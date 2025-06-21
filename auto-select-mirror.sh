@@ -460,8 +460,10 @@ update_package_lists() {
 
 # Function to test mirror speed (optional)
 test_mirror_speed() {
-    if [ "$DISABLE_SPEED_TEST" -eq "1" ]; then
-      return
+    # Check if speed testing is disabled
+    if [ "${DISABLE_SPEED_TEST:-0}" -eq "1" ]; then
+        log_info "Speed testing disabled by DISABLE_SPEED_TEST=1"
+        return 0
     fi
 
     log_info "Testing mirror speed..."
@@ -535,7 +537,7 @@ main() {
     # Detect distribution
     detect_distro
     
-    if [ "$DEBUG" -eq "1" ]; then
+    if [ "${DEBUG:-0}" -eq "1" ]; then
         # Debug current state
         log_info "=== DEBUG: Initial APT sources state ==="
         debug_apt_sources
@@ -573,7 +575,7 @@ main() {
         exit 1
     fi
     
-    if [ "$DEBUG" -eq "1" ]; then
+    if [ "${DEBUG:-0}" -eq "1" ]; then
         # Debug after configuration
         log_info "=== DEBUG: APT sources after configuration ==="
         debug_apt_sources
@@ -583,7 +585,7 @@ main() {
     if update_package_lists; then
         log_success "Mirror configuration completed successfully!"
         
-        if [ "$DEBUG" -eq "1" ]; then
+        if [ "${DEBUG:-0}" -eq "1" ]; then
             # Verify only our mirrors are being used
             log_info "Verifying mirror configuration..."
             if apt-get update -o Debug::Acquire::http=true 2>&1 | grep -q "deb.debian.org\|archive.ubuntu.com"; then
