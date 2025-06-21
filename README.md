@@ -333,9 +333,9 @@ This project is licensed under the MIT License - see the [LICENSE](LICENSE) file
 
 ## 📞 Support
 
-- **Issues**: [GitHub Issues](https://github.com/AlienGen/debian-ubuntu-mirror-geoselect/mirror-selection/issues)
-- **Discussions**: [GitHub Discussions](https://github.com/AlienGen/debian-ubuntu-mirror-geoselect/mirror-selection/discussions)
-- **Email**: support@your-org.com
+- **Issues**: [GitHub Issues](https://github.com/AlienGen/debian-ubuntu-mirror-geoselect/issues)
+- **Website** [AlienGen](https://www.aliengen.com)
+- **Email**: opensource@aliengen.com
 
 ## 📈 Version History
 
