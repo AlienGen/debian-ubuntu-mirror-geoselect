@@ -76,8 +76,7 @@ jobs:
             "${{ matrix.image }}" \
             bash -c '
               set -euo pipefail
-              chmod +x /auto-select-mirror.sh
-              /auto-select-mirror.sh
+              bash /auto-select-mirror.sh
               grep -qE "^deb " /etc/apt/sources.list
               apt-get install -y --no-install-recommends curl
               curl --version >/dev/null
@@ -107,8 +106,7 @@ jobs:
               fi
               # Also clear SSL_CERT_FILE if the image sets it
               unset SSL_CERT_FILE || true
-              chmod +x /auto-select-mirror.sh
-              /auto-select-mirror.sh
+              bash /auto-select-mirror.sh
               grep -qE "^deb " /etc/apt/sources.list
               apt-get install -y --no-install-recommends curl
               curl --version >/dev/null
