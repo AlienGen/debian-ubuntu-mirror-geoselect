@@ -47,6 +47,11 @@ if [ -z "$DEBUG" ]; then
     DEBUG=0
 fi
 
+# Set when mirrors were written with http:// due to missing CA store
+BOOTSTRAPPED_WITH_HTTP=0
+# Optional override for get_mirror_candidates: http|https
+FORCE_MIRROR_SCHEME=""
+
 readonly RED='\033[0;31m'
 readonly GREEN='\033[0;32m'
 readonly YELLOW='\033[1;33m'
@@ -119,7 +124,26 @@ http_extract_body() {
     '
 }
 
-# GET via openssl s_client (HTTPS)
+# True when a usable CA bundle is present (needed for apt HTTPS)
+has_ca_certificates() {
+    local cert="${SSL_CERT_FILE:-/etc/ssl/certs/ca-certificates.crt}"
+    [ -s "$cert" ]
+}
+
+# http when CA missing (or FORCE_MIRROR_SCHEME set), else https
+mirror_scheme() {
+    if [ -n "${FORCE_MIRROR_SCHEME:-}" ]; then
+        echo "$FORCE_MIRROR_SCHEME"
+        return
+    fi
+    if has_ca_certificates; then
+        echo "https"
+    else
+        echo "http"
+    fi
+}
+
+# GET via openssl s_client (HTTPS); prints body to stdout
 http_get_openssl() {
     local host="$1"
     local path="$2"
@@ -140,7 +164,7 @@ http_get_openssl() {
     printf '%s\n' "$body"
 }
 
-# GET via bash /dev/tcp (HTTP only)
+# GET via bash /dev/tcp (HTTP only); prints body to stdout
 http_get_devtcp() {
     local host="$1"
     local path="$2"
@@ -163,18 +187,19 @@ http_get_devtcp() {
 }
 
 # HTTP GET with transport cascade: curl → wget → openssl → /dev/tcp
-# Sets HTTP_TRANSPORT to the transport that succeeded.
+# Sets globals HTTP_BODY and HTTP_TRANSPORT (not lost under $(...) callers).
 http_get() {
     local url="$1"
     local body=""
 
     HTTP_TRANSPORT=""
+    HTTP_BODY=""
 
     if command -v curl >/dev/null 2>&1; then
         if body=$(curl -fsSL --max-time 10 --retry 2 "$url" 2>/dev/null); then
             if [ -n "$body" ]; then
                 HTTP_TRANSPORT="curl"
-                printf '%s\n' "$body"
+                HTTP_BODY="$body"
                 return 0
             fi
         fi
@@ -184,7 +209,7 @@ http_get() {
         if body=$(wget -qO- --timeout=10 "$url" 2>/dev/null); then
             if [ -n "$body" ]; then
                 HTTP_TRANSPORT="wget"
-                printf '%s\n' "$body"
+                HTTP_BODY="$body"
                 return 0
             fi
         fi
@@ -197,13 +222,13 @@ http_get() {
     if [ "$HTTP_SCHEME" = "https" ]; then
         if body=$(http_get_openssl "$HTTP_HOST" "$HTTP_PATH"); then
             HTTP_TRANSPORT="openssl"
-            printf '%s\n' "$body"
+            HTTP_BODY="$body"
             return 0
         fi
     elif [ "$HTTP_SCHEME" = "http" ]; then
         if body=$(http_get_devtcp "$HTTP_HOST" "$HTTP_PATH"); then
             HTTP_TRANSPORT="devtcp"
-            printf '%s\n' "$body"
+            HTTP_BODY="$body"
             return 0
         fi
     fi
@@ -330,7 +355,7 @@ detect_location() {
 
     log_info "Detecting geographical location..."
 
-    local country="" body=""
+    local country=""
     local services=(
         "https://ipapi.co/country_code"
         "https://ipinfo.io/country"
@@ -348,8 +373,8 @@ detect_location() {
 
     for service in "${services[@]}"; do
         log_info "Trying service: $service"
-        if body=$(http_get "$service" 2>/dev/null); then
-            if country=$(normalize_country "$body"); then
+        if http_get "$service" 2>/dev/null; then
+            if country=$(normalize_country "$HTTP_BODY"); then
                 log_success "Location detected: $country (via $HTTP_TRANSPORT)"
                 echo "$country"
                 return
@@ -398,12 +423,21 @@ get_mirror_candidates() {
     local country="$1"
     local distro="$2"
     local codename="$3"
-    local debian_security="https://security.debian.org/debian-security"
+    local scheme
+    scheme=$(mirror_scheme)
+    local debian_security="${scheme}://security.debian.org/debian-security"
 
     MIRROR_CANDIDATES=()
     MIRROR_CANDIDATE_LABELS=()
 
-    log_info "Selecting mirrors for $country..."
+    if [ "$scheme" = "http" ]; then
+        log_warning "CA certificates missing or HTTP forced; using HTTP mirrors to bootstrap"
+        BOOTSTRAPPED_WITH_HTTP=1
+    else
+        BOOTSTRAPPED_WITH_HTTP=0
+    fi
+
+    log_info "Selecting mirrors for $country (scheme: $scheme)..."
 
     add_debian_candidate() {
         local label="$1"
@@ -424,72 +458,72 @@ get_mirror_candidates() {
         CN|HK|TW|MO)
             log_info "Using Chinese mirrors (regional → CDN fallback)"
             if [ "$distro" = "debian" ]; then
-                add_debian_candidate "Tsinghua" "https://mirrors.tuna.tsinghua.edu.cn/debian/" \
-                    "https://mirrors.tuna.tsinghua.edu.cn/debian-security"
-                add_debian_candidate "USTC" "https://mirrors.ustc.edu.cn/debian/" \
-                    "https://mirrors.ustc.edu.cn/debian-security"
-                add_debian_candidate "Debian CDN" "https://deb.debian.org/debian/"
+                add_debian_candidate "Tsinghua" "${scheme}://mirrors.tuna.tsinghua.edu.cn/debian/" \
+                    "${scheme}://mirrors.tuna.tsinghua.edu.cn/debian-security"
+                add_debian_candidate "USTC" "${scheme}://mirrors.ustc.edu.cn/debian/" \
+                    "${scheme}://mirrors.ustc.edu.cn/debian-security"
+                add_debian_candidate "Debian CDN" "${scheme}://deb.debian.org/debian/"
             elif [ "$distro" = "ubuntu" ]; then
-                add_ubuntu_candidate "Tsinghua" "https://mirrors.tuna.tsinghua.edu.cn/ubuntu/"
-                add_ubuntu_candidate "USTC" "https://mirrors.ustc.edu.cn/ubuntu/"
-                add_ubuntu_candidate "Ubuntu archive" "https://archive.ubuntu.com/ubuntu/"
+                add_ubuntu_candidate "Tsinghua" "${scheme}://mirrors.tuna.tsinghua.edu.cn/ubuntu/"
+                add_ubuntu_candidate "USTC" "${scheme}://mirrors.ustc.edu.cn/ubuntu/"
+                add_ubuntu_candidate "Ubuntu archive" "${scheme}://archive.ubuntu.com/ubuntu/"
             fi
             ;;
         JP|KR)
             log_info "Using Japanese mirrors (regional → CDN fallback)"
             if [ "$distro" = "debian" ]; then
-                add_debian_candidate "ftp.jp.debian.org" "https://ftp.jp.debian.org/debian/"
-                add_debian_candidate "Debian CDN" "https://deb.debian.org/debian/"
+                add_debian_candidate "ftp.jp.debian.org" "${scheme}://ftp.jp.debian.org/debian/"
+                add_debian_candidate "Debian CDN" "${scheme}://deb.debian.org/debian/"
             elif [ "$distro" = "ubuntu" ]; then
-                add_ubuntu_candidate "jp.archive.ubuntu.com" "https://jp.archive.ubuntu.com/ubuntu/"
-                add_ubuntu_candidate "Ubuntu archive" "https://archive.ubuntu.com/ubuntu/"
+                add_ubuntu_candidate "jp.archive.ubuntu.com" "${scheme}://jp.archive.ubuntu.com/ubuntu/"
+                add_ubuntu_candidate "Ubuntu archive" "${scheme}://archive.ubuntu.com/ubuntu/"
             fi
             ;;
         SG|MY|TH|VN|ID|PH)
             log_info "Using Singapore mirrors (regional → CDN fallback)"
             if [ "$distro" = "debian" ]; then
-                add_debian_candidate "ftp.sg.debian.org" "https://ftp.sg.debian.org/debian/"
-                add_debian_candidate "Debian CDN" "https://deb.debian.org/debian/"
+                add_debian_candidate "ftp.sg.debian.org" "${scheme}://ftp.sg.debian.org/debian/"
+                add_debian_candidate "Debian CDN" "${scheme}://deb.debian.org/debian/"
             elif [ "$distro" = "ubuntu" ]; then
-                add_ubuntu_candidate "sg.archive.ubuntu.com" "https://sg.archive.ubuntu.com/ubuntu/"
-                add_ubuntu_candidate "Ubuntu archive" "https://archive.ubuntu.com/ubuntu/"
+                add_ubuntu_candidate "sg.archive.ubuntu.com" "${scheme}://sg.archive.ubuntu.com/ubuntu/"
+                add_ubuntu_candidate "Ubuntu archive" "${scheme}://archive.ubuntu.com/ubuntu/"
             fi
             ;;
         AU|NZ)
             log_info "Using Australian mirrors (regional → CDN fallback)"
             if [ "$distro" = "debian" ]; then
-                add_debian_candidate "ftp.au.debian.org" "https://ftp.au.debian.org/debian/"
-                add_debian_candidate "Debian CDN" "https://deb.debian.org/debian/"
+                add_debian_candidate "ftp.au.debian.org" "${scheme}://ftp.au.debian.org/debian/"
+                add_debian_candidate "Debian CDN" "${scheme}://deb.debian.org/debian/"
             elif [ "$distro" = "ubuntu" ]; then
-                add_ubuntu_candidate "au.archive.ubuntu.com" "https://au.archive.ubuntu.com/ubuntu/"
-                add_ubuntu_candidate "Ubuntu archive" "https://archive.ubuntu.com/ubuntu/"
+                add_ubuntu_candidate "au.archive.ubuntu.com" "${scheme}://au.archive.ubuntu.com/ubuntu/"
+                add_ubuntu_candidate "Ubuntu archive" "${scheme}://archive.ubuntu.com/ubuntu/"
             fi
             ;;
         GB|IE)
             log_info "Using UK mirrors (regional → CDN fallback)"
             if [ "$distro" = "debian" ]; then
-                add_debian_candidate "ftp.uk.debian.org" "https://ftp.uk.debian.org/debian/"
-                add_debian_candidate "Debian CDN" "https://deb.debian.org/debian/"
+                add_debian_candidate "ftp.uk.debian.org" "${scheme}://ftp.uk.debian.org/debian/"
+                add_debian_candidate "Debian CDN" "${scheme}://deb.debian.org/debian/"
             elif [ "$distro" = "ubuntu" ]; then
-                add_ubuntu_candidate "gb.archive.ubuntu.com" "https://gb.archive.ubuntu.com/ubuntu/"
-                add_ubuntu_candidate "Ubuntu archive" "https://archive.ubuntu.com/ubuntu/"
+                add_ubuntu_candidate "gb.archive.ubuntu.com" "${scheme}://gb.archive.ubuntu.com/ubuntu/"
+                add_ubuntu_candidate "Ubuntu archive" "${scheme}://archive.ubuntu.com/ubuntu/"
             fi
             ;;
         DE|AT|CH|NL|BE|FR|IT|ES|PT)
             log_info "Using European mirrors (CDN)"
             if [ "$distro" = "debian" ]; then
-                add_debian_candidate "Debian CDN" "https://deb.debian.org/debian/"
+                add_debian_candidate "Debian CDN" "${scheme}://deb.debian.org/debian/"
             elif [ "$distro" = "ubuntu" ]; then
-                add_ubuntu_candidate "Ubuntu archive" "https://archive.ubuntu.com/ubuntu/"
+                add_ubuntu_candidate "Ubuntu archive" "${scheme}://archive.ubuntu.com/ubuntu/"
             fi
             ;;
         *)
             log_info "Using US / default mirrors (CDN)"
             if [ "$distro" = "debian" ]; then
-                add_debian_candidate "Debian CDN" "https://deb.debian.org/debian/"
+                add_debian_candidate "Debian CDN" "${scheme}://deb.debian.org/debian/"
             elif [ "$distro" = "ubuntu" ]; then
-                add_ubuntu_candidate "us.archive.ubuntu.com" "https://us.archive.ubuntu.com/ubuntu/"
-                add_ubuntu_candidate "Ubuntu archive" "https://archive.ubuntu.com/ubuntu/"
+                add_ubuntu_candidate "us.archive.ubuntu.com" "${scheme}://us.archive.ubuntu.com/ubuntu/"
+                add_ubuntu_candidate "Ubuntu archive" "${scheme}://archive.ubuntu.com/ubuntu/"
             fi
             ;;
     esac
@@ -655,13 +689,32 @@ clean_apt_sources() {
 update_package_lists() {
     log_info "Updating package lists..."
 
-    if apt-get update -y; then
-        log_success "Package lists updated successfully"
-        return 0
+    local output status
+    set +e
+    output=$(apt-get update -y -o APT::Update::Error-Mode=any 2>&1)
+    status=$?
+    set -e
+
+    printf '%s\n' "$output" >&2
+
+    if printf '%s\n' "$output" | grep -qiE 'Failed to fetch|No system certificates available|Certificate verification failed'; then
+        log_error "Failed to update package lists (fetch/certificate errors)"
+        return 1
     fi
 
-    log_error "Failed to update package lists"
-    return 1
+    if [ "$status" -ne 0 ]; then
+        log_error "Failed to update package lists"
+        return 1
+    fi
+
+    if ! ls /var/lib/apt/lists/*_InRelease >/dev/null 2>&1 && \
+       ! ls /var/lib/apt/lists/*_Release >/dev/null 2>&1; then
+        log_error "Failed to update package lists (no Release files acquired)"
+        return 1
+    fi
+
+    log_success "Package lists updated successfully"
+    return 0
 }
 
 write_sources_list() {
@@ -700,6 +753,7 @@ apply_mirrors_with_fallback() {
 
         if update_package_lists; then
             SELECTED_MIRROR_LABEL="$label"
+            SELECTED_MIRROR_CONTENT="$mirrors"
             return 0
         fi
 
@@ -707,6 +761,63 @@ apply_mirrors_with_fallback() {
     done
 
     return 1
+}
+
+# After HTTP bootstrap: install ca-certificates and switch sources to HTTPS
+upgrade_to_https_after_bootstrap() {
+    local country="$1"
+    local distro="$2"
+    local codename="$3"
+    local selected_label="$4"
+    local http_content="$5"
+    local i mirrors
+
+    if [ "${BOOTSTRAPPED_WITH_HTTP:-0}" != "1" ]; then
+        return 0
+    fi
+
+    log_info "Installing ca-certificates to enable HTTPS mirrors..."
+    if ! DEBIAN_FRONTEND=noninteractive apt-get install -y --no-install-recommends ca-certificates; then
+        log_warning "Failed to install ca-certificates; keeping HTTP mirrors"
+        return 0
+    fi
+
+    if ! has_ca_certificates; then
+        log_warning "ca-certificates installed but CA bundle still missing; keeping HTTP mirrors"
+        return 0
+    fi
+
+    log_info "Upgrading mirror URLs from HTTP to HTTPS..."
+    FORCE_MIRROR_SCHEME=https
+    get_mirror_candidates "$country" "$distro" "$codename"
+    FORCE_MIRROR_SCHEME=""
+
+    mirrors=""
+    for i in "${!MIRROR_CANDIDATE_LABELS[@]}"; do
+        if [ "${MIRROR_CANDIDATE_LABELS[$i]}" = "$selected_label" ]; then
+            mirrors="${MIRROR_CANDIDATES[$i]}"
+            break
+        fi
+    done
+
+    if [ -z "$mirrors" ]; then
+        mirrors="${MIRROR_CANDIDATES[0]}"
+        selected_label="${MIRROR_CANDIDATE_LABELS[0]}"
+    fi
+
+    if write_sources_list "$mirrors" "$selected_label (HTTPS)" && update_package_lists; then
+        SELECTED_MIRROR_LABEL="$selected_label"
+        SELECTED_MIRROR_CONTENT="$mirrors"
+        BOOTSTRAPPED_WITH_HTTP=0
+        log_success "Mirrors upgraded to HTTPS"
+        return 0
+    fi
+
+    log_warning "HTTPS upgrade failed; restoring working HTTP mirrors"
+    write_sources_list "$http_content" "$selected_label (HTTP)" || true
+    update_package_lists || true
+    BOOTSTRAPPED_WITH_HTTP=1
+    return 0
 }
 
 restore_backups() {
@@ -827,6 +938,9 @@ main() {
     fi
 
     if apply_mirrors_with_fallback; then
+        upgrade_to_https_after_bootstrap "$country" "$DISTRO_NAME" "$DISTRO_CODENAME" \
+            "$SELECTED_MIRROR_LABEL" "$SELECTED_MIRROR_CONTENT"
+
         log_success "Mirror configuration completed successfully! (using $SELECTED_MIRROR_LABEL)"
 
         if [ "${DEBUG:-0}" = "1" ]; then

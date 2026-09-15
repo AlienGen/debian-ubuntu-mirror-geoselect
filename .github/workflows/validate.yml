@@ -1,0 +1,121 @@
+name: Validate
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+    branches: [main]
+
+jobs:
+  syntax:
+    name: Syntax
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: bash -n
+        run: bash -n auto-select-mirror.sh
+
+  helpers:
+    name: Offline helpers
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Run helper assertions
+        run: |
+          set -euo pipefail
+          export DEBUG=0
+          bash << 'EOF'
+          set -eo pipefail
+          export DEBUG=0
+          eval "$(sed 's/^main()$/__real_main()/' auto-select-mirror.sh | sed 's/^main "\$@"$/true/')"
+
+          c=$(normalize_country "cn")
+          [ "$c" = "CN" ]
+
+          SSL_CERT_FILE=/nonexistent
+          FORCE_MIRROR_SCHEME=
+          [ "$(mirror_scheme)" = "http" ]
+
+          TZ=Asia/Shanghai
+          unset LC_ALL LC_CTYPE LANG || true
+          country=$(infer_location_from_system)
+          [ "$country" = "CN" ]
+
+          FORCE_MIRROR_SCHEME=http
+          get_mirror_candidates "CN" "debian" "bookworm"
+          echo "${MIRROR_CANDIDATES[0]}" | grep -q 'mirrors.tuna.tsinghua.edu.cn'
+          echo "${MIRROR_CANDIDATES[-1]}" | grep -q 'deb.debian.org'
+          [ "$BOOTSTRAPPED_WITH_HTTP" = "1" ]
+
+          echo "helper checks passed"
+          EOF
+
+  docker-smoke:
+    name: Docker smoke (${{ matrix.image }})
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        image:
+          - debian:bookworm-slim
+          - debian:bullseye-slim
+          - ubuntu:22.04
+          - ubuntu:24.04
+    steps:
+      - uses: actions/checkout@v4
+      - name: Pull image
+        run: docker pull "${{ matrix.image }}"
+      - name: Run script and verify apt install
+        run: |
+          set -euo pipefail
+          docker run --rm \
+            -v "$PWD/auto-select-mirror.sh:/auto-select-mirror.sh:ro" \
+            -e DEBIAN_FRONTEND=noninteractive \
+            -e FORCE_COUNTRY=US \
+            -e DISABLE_SPEED_TEST=1 \
+            "${{ matrix.image }}" \
+            bash -c '
+              set -euo pipefail
+              chmod +x /auto-select-mirror.sh
+              /auto-select-mirror.sh
+              grep -qE "^deb " /etc/apt/sources.list
+              apt-get install -y --no-install-recommends curl
+              curl --version >/dev/null
+            '
+
+  http-bootstrap:
+    name: HTTP CA bootstrap
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Pull bookworm-slim
+        run: docker pull debian:bookworm-slim
+      - name: Run with CA bundle hidden
+        run: |
+          set -euo pipefail
+          docker run --rm \
+            -v "$PWD/auto-select-mirror.sh:/auto-select-mirror.sh:ro" \
+            -e DEBIAN_FRONTEND=noninteractive \
+            -e FORCE_COUNTRY=US \
+            -e DISABLE_SPEED_TEST=1 \
+            debian:bookworm-slim \
+            bash -c '
+              set -euo pipefail
+              # Hide CA bundle so the script must HTTP-bootstrap
+              if [ -e /etc/ssl/certs/ca-certificates.crt ]; then
+                mv /etc/ssl/certs/ca-certificates.crt /etc/ssl/certs/ca-certificates.crt.bak
+              fi
+              # Also clear SSL_CERT_FILE if the image sets it
+              unset SSL_CERT_FILE || true
+              chmod +x /auto-select-mirror.sh
+              /auto-select-mirror.sh
+              grep -qE "^deb " /etc/apt/sources.list
+              apt-get install -y --no-install-recommends curl
+              curl --version >/dev/null
+              # After bootstrap, CA bundle should exist again (or HTTP mirrors still work)
+              if [ -s /etc/ssl/certs/ca-certificates.crt ]; then
+                echo "CA bundle restored after bootstrap"
+              else
+                echo "CA bundle still missing but apt install succeeded over HTTP"
+              fi
+            '

@@ -1,5 +1,6 @@
 # Debian/Ubuntu Mirror Auto-Selection Script based on geographical location
 
+[![Validate](https://github.com/AlienGen/debian-ubuntu-mirror-geoselect/actions/workflows/validate.yml/badge.svg?branch=main)](https://github.com/AlienGen/debian-ubuntu-mirror-geoselect/actions/workflows/validate.yml)
 [![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](https://opensource.org/licenses/MIT)
 [![Shell Script](https://img.shields.io/badge/Shell-Bash-blue.svg)](https://www.gnu.org/software/bash/)
 [![Platform](https://img.shields.io/badge/Platform-Debian%20%7C%20Ubuntu-green.svg)](https://www.debian.org/)
@@ -10,7 +11,7 @@ A smart, automated script that detects your geographical location and configures
 
 - **🌍 Automatic Geographical Detection** - IP geolocation with multiple HTTP transports
 - **🚀 Optimized Mirrors** - Pre-configured fast mirrors for China, Japan, Korea, and other regions
-- **🔄 Deep Fallback Chain** - Transport, offline heuristics, and ordered mirror candidates
+- **🔄 Deep Fallback Chain** - Transport, offline heuristics, ordered mirror candidates, HTTP→HTTPS CA bootstrap
 - **🛡️ Safe Execution** - Creates automatic backups before making changes
 - **📊 Comprehensive Logging** - Colored output with detailed progress information
 - **🔧 Multi-Distribution Support** - Works with both Debian and Ubuntu systems
@@ -32,6 +33,7 @@ A smart, automated script that detects your geographical location and configures
 - **Network**: Internet connectivity for geolocation and `apt-get update`
 - **Geolocation transports** (first available wins): `curl`, `wget`, `openssl` (HTTPS), or bash `/dev/tcp` (HTTP)
 - **Note**: `debian:*-slim` / `ubuntu:*-slim` images usually **do not** ship `curl` or `wget`. The script can still geolocate via `openssl` (typically present) or HTTP `/dev/tcp`, then fall back to timezone/`LANG` heuristics.
+- **CA / HTTPS bootstrap**: If `/etc/ssl/certs/ca-certificates.crt` is missing, the script uses **HTTP** mirrors first, runs a strict `apt-get update` (fails on fetch/cert errors), installs `ca-certificates`, then upgrades sources to **HTTPS**. It no longer treats a failed HTTPS update as success.
 
 ### How location and mirrors are chosen
 
@@ -39,7 +41,20 @@ A smart, automated script that detects your geographical location and configures
 2. HTTP geo APIs via `curl` → `wget` → `openssl s_client` → bash `/dev/tcp`
 3. Offline heuristics from `TZ` / `/etc/timezone` / locale
 4. Default `US`
-5. For the chosen region: try primary mirror → alternate (when defined) → official CDN until `apt-get update` succeeds
+5. Choose `http` or `https` based on whether a CA bundle is present
+6. For the chosen region: try primary mirror → alternate (when defined) → official CDN until a strict `apt-get update` succeeds
+7. If bootstrapped over HTTP: install `ca-certificates` and rewrite sources to HTTPS
+
+## Continuous Integration
+
+GitHub Actions (`.github/workflows/validate.yml`) runs on pushes and PRs to `main`:
+
+- Syntax check (`bash -n`)
+- Offline helper assertions (no live geolocation)
+- Docker smoke on `debian:bookworm-slim`, `debian:bullseye-slim`, `ubuntu:22.04`, and `ubuntu:24.04` (`FORCE_COUNTRY=US` for a deterministic apt path)
+- CA-missing HTTP bootstrap on `bookworm-slim`
+
+This is smoke/integration coverage of the slim Docker + apt path, **not** live IP geolocation. Public repositories get GitHub-hosted Linux runner minutes at no charge (fair-use limits apply).
 
 ## 🚀 Quick Start
 
@@ -258,11 +273,17 @@ To add custom mirrors for your region, edit the `get_mirror_candidates()` functi
 
 #### 3. Mirror Update Fails
 ```bash
-[ERROR] Failed to update package lists
+[ERROR] Failed to update package lists (fetch/certificate errors)
 ```
-**Solution:** The script automatically restores your backup. Check your network connection.
+**Solution:** The script retries the next mirror candidate, then restores your backup if all fail. On slim images without a CA bundle it should auto-bootstrap over HTTP and install `ca-certificates`.
 
-#### 4. Curl / wget not in slim images
+#### 4. Certificate / empty package indexes after mirror select
+```bash
+W: ... No system certificates available. Try installing ca-certificates.
+```
+**Solution:** Current script (v1.1.0+) detects a missing CA store, writes `http://` mirrors, installs `ca-certificates`, then switches to `https://`. If you still see this on an older copy, install `ca-certificates` over HTTP first or update the script.
+
+#### 5. Curl / wget not in slim images
 ```bash
 [INFO] curl/wget not available; using openssl for HTTPS geolocation
 ```
@@ -357,7 +378,9 @@ This project is licensed under the MIT License - see the [LICENSE](LICENSE) file
   - Fix false-positive failure when using official `deb.debian.org` / `archive.ubuntu.com` mirrors
   - HTTP transport fallbacks: curl → wget → openssl → `/dev/tcp`
   - Offline location heuristics from timezone and locale
-  - Ordered mirror candidates with `apt-get update` verification
+  - Ordered mirror candidates with strict `apt-get update` verification
+  - HTTP mirror bootstrap when CA bundle is missing, then install `ca-certificates` and upgrade to HTTPS
+  - Fix empty geolocation transport label (`via` lost under command substitution)
   - Clearer Docker slim-image documentation
 - **v1.0.0** (2025-06-21)
   - Initial release
