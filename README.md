@@ -8,13 +8,13 @@ A smart, automated script that detects your geographical location and configures
 
 ## 🌟 Features
 
-- **🌍 Automatic Geographical Detection** - Uses IP geolocation to determine your location
+- **🌍 Automatic Geographical Detection** - IP geolocation with multiple HTTP transports
 - **🚀 Optimized Mirrors** - Pre-configured fast mirrors for China, Japan, Korea, and other regions
-- **🔄 Fallback System** - Graceful fallback to reliable default mirrors if detection fails
+- **🔄 Deep Fallback Chain** - Transport, offline heuristics, and ordered mirror candidates
 - **🛡️ Safe Execution** - Creates automatic backups before making changes
 - **📊 Comprehensive Logging** - Colored output with detailed progress information
 - **🔧 Multi-Distribution Support** - Works with both Debian and Ubuntu systems
-- **⚡ Speed Testing** - Optional mirror speed testing for verification
+- **⚡ Speed Testing** - Optional `apt-get download` mirror speed testing
 
 ## 🎯 Perfect For
 
@@ -27,26 +27,63 @@ A smart, automated script that detects your geographical location and configures
 ## 📋 Requirements
 
 - **Operating System**: Debian, Ubuntu, or compatible distributions
-- **Dependencies**: `curl` (for IP geolocation)
+- **Shell**: `bash`
 - **Permissions**: Root access (for writing to `/etc/apt/sources.list`)
-- **Network**: Internet connectivity for geolocation and mirror testing
+- **Network**: Internet connectivity for geolocation and `apt-get update`
+- **Geolocation transports** (first available wins): `curl`, `wget`, `openssl` (HTTPS), or bash `/dev/tcp` (HTTP)
+- **Note**: `debian:*-slim` / `ubuntu:*-slim` images usually **do not** ship `curl` or `wget`. The script can still geolocate via `openssl` (typically present) or HTTP `/dev/tcp`, then fall back to timezone/`LANG` heuristics.
+
+### How location and mirrors are chosen
+
+1. `FORCE_COUNTRY` if set
+2. HTTP geo APIs via `curl` → `wget` → `openssl s_client` → bash `/dev/tcp`
+3. Offline heuristics from `TZ` / `/etc/timezone` / locale
+4. Default `US`
+5. For the chosen region: try primary mirror → alternate (when defined) → official CDN until `apt-get update` succeeds
 
 ## 🚀 Quick Start
 
 ### One-Liner Installation & Execution
 
-For Docker, CI/CD, or server environments, you can download and run the script in one command:
+For servers or CI images that already have `curl`:
 
 ```bash
-# Basic one-liner (download and execute)
 curl -fsSL https://raw.githubusercontent.com/AlienGen/debian-ubuntu-mirror-geoselect/main/auto-select-mirror.sh | sudo bash
 ```
 
 ### Dockerfile Integration
 
+**Important:** slim base images do not include `curl`, so a bare `RUN curl ... | bash` will fail until curl is installed (or you COPY/`ADD` the script).
+
+#### Option A — COPY the script (recommended, no curl needed to fetch)
+
 ```dockerfile
-# Simple one-liner in Dockerfile
-RUN curl -fsSL https://raw.githubusercontent.com/AlienGen/debian-ubuntu-mirror-geoselect/main/auto-select-mirror.sh | bash
+FROM debian:bookworm-slim
+COPY auto-select-mirror.sh /auto-select-mirror.sh
+RUN chmod +x /auto-select-mirror.sh && /auto-select-mirror.sh
+```
+
+Geolocation still works without curl (openssl / heuristics). To pin a region:
+
+```dockerfile
+RUN FORCE_COUNTRY=CN /auto-select-mirror.sh
+```
+
+#### Option B — `ADD` remote URL (fetch without curl in the image)
+
+```dockerfile
+FROM debian:bookworm-slim
+ADD https://raw.githubusercontent.com/AlienGen/debian-ubuntu-mirror-geoselect/main/auto-select-mirror.sh /auto-select-mirror.sh
+RUN chmod +x /auto-select-mirror.sh && /auto-select-mirror.sh
+```
+
+#### Option C — Bootstrap curl, then one-liner
+
+```dockerfile
+FROM debian:bookworm-slim
+RUN apt-get update && apt-get install -y --no-install-recommends curl ca-certificates \
+ && curl -fsSL https://raw.githubusercontent.com/AlienGen/debian-ubuntu-mirror-geoselect/main/auto-select-mirror.sh | bash \
+ && apt-get purge -y curl && apt-get autoremove -y && rm -rf /var/lib/apt/lists/*
 ```
 
 ### CI/CD Pipeline Integration
@@ -167,23 +204,7 @@ Reading package lists...
 
 ### Docker Integration
 
-```dockerfile
-# In your Dockerfile
-COPY auto-select-mirror.sh /auto-select-mirror.sh
-RUN chmod +x /auto-select-mirror.sh && \
-    /auto-select-mirror.sh
-```
-
-### CI/CD Pipeline Example
-
-```yaml
-# GitHub Actions example
-- name: Optimize package mirrors
-  run: |
-    curl -O https://raw.githubusercontent.com/AlienGen/debian-ubuntu-mirror-geoselect/main/auto-select-mirror.sh
-    chmod +x auto-select-mirror.sh
-    sudo ./auto-select-mirror.sh
-```
+See [Dockerfile Integration](#dockerfile-integration) above for COPY, `ADD`, and curl-bootstrap recipes. Slim images lack `curl`/`wget` by default.
 
 ## 🌍 Supported Regions
 
@@ -217,18 +238,7 @@ sudo ./auto-select-mirror.sh
 
 ### Custom Mirror Configuration
 
-To add custom mirrors for your region, edit the `get_mirrors()` function in the script:
-
-```bash
-# Add your custom region
-case "$country" in
-    YOUR_COUNTRY_CODE)
-        log_info "Using your custom mirrors"
-        # Add your mirror configuration here
-        ;;
-    # ... existing cases
-esac
-```
+To add custom mirrors for your region, edit the `get_mirror_candidates()` function in the script and append candidates with `add_debian_candidate` / `add_ubuntu_candidate` (primary first, CDN last).
 
 ## 🛠️ Troubleshooting
 
@@ -252,11 +262,15 @@ esac
 ```
 **Solution:** The script automatically restores your backup. Check your network connection.
 
-#### 4. Curl Not Found
+#### 4. Curl / wget not in slim images
 ```bash
-[WARNING] curl not available, using default mirrors
+[INFO] curl/wget not available; using openssl for HTTPS geolocation
 ```
-**Solution:** Install curl: `apt-get install curl`
+or
+```bash
+[WARNING] curl/wget/openssl not available; will try HTTP /dev/tcp and offline heuristics
+```
+**Solution:** No install required in most cases — the script falls back to `openssl`, HTTP `/dev/tcp`, then timezone/`LANG`. To force a region: `FORCE_COUNTRY=CN`. To fetch the script itself into a slim image, use `COPY`, Docker `ADD` of the raw URL, or install curl temporarily (see Dockerfile options above).
 
 ### Debug Mode
 
@@ -296,7 +310,7 @@ Typical speed improvements by region:
 - **Backup Creation**: Automatic backup before any changes
 - **Error Handling**: Graceful fallback on failures
 - **Input Validation**: Sanitized inputs and outputs
-- **Minimal Dependencies**: Only requires `curl` for geolocation
+- **Minimal Dependencies**: Geolocation works with curl, wget, openssl, or bash `/dev/tcp`
 - **Open Source**: Full transparency of all operations
 
 ## 🤝 Contributing
@@ -339,6 +353,12 @@ This project is licensed under the MIT License - see the [LICENSE](LICENSE) file
 
 ## 📈 Version History
 
+- **v1.1.0** (2026-09-15)
+  - Fix false-positive failure when using official `deb.debian.org` / `archive.ubuntu.com` mirrors
+  - HTTP transport fallbacks: curl → wget → openssl → `/dev/tcp`
+  - Offline location heuristics from timezone and locale
+  - Ordered mirror candidates with `apt-get update` verification
+  - Clearer Docker slim-image documentation
 - **v1.0.0** (2025-06-21)
   - Initial release
   - Support for Debian and Ubuntu
