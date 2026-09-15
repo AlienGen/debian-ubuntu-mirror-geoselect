@@ -398,11 +398,31 @@ build_debian_sources() {
     local archive_url="$1"
     local security_url="$2"
     local codename="$3"
+    local components include_backports
+
+    case "$codename" in
+        bullseye|buster|stretch|jessie)
+            # Pre-bookworm: no non-free-firmware; backports suites are closed/archived
+            components="main contrib non-free"
+            include_backports=0
+            ;;
+        *)
+            components="main contrib non-free non-free-firmware"
+            include_backports=1
+            ;;
+    esac
+
     cat << EOF
-deb ${archive_url} ${codename} main contrib non-free non-free-firmware
-deb ${archive_url} ${codename}-updates main contrib non-free non-free-firmware
-deb ${archive_url} ${codename}-backports main contrib non-free non-free-firmware
-deb ${security_url} ${codename}-security main contrib non-free non-free-firmware
+deb ${archive_url} ${codename} ${components}
+deb ${archive_url} ${codename}-updates ${components}
+EOF
+    if [ "$include_backports" = "1" ]; then
+        cat << EOF
+deb ${archive_url} ${codename}-backports ${components}
+EOF
+    fi
+    cat << EOF
+deb ${security_url} ${codename}-security ${components}
 EOF
 }
 

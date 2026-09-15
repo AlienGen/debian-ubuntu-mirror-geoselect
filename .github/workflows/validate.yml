@@ -46,6 +46,14 @@ jobs:
           echo "${MIRROR_CANDIDATES[0]}" | grep -q 'mirrors.tuna.tsinghua.edu.cn'
           echo "${MIRROR_CANDIDATES[-1]}" | grep -q 'deb.debian.org'
           [ "$BOOTSTRAPPED_WITH_HTTP" = "1" ]
+          echo "${MIRROR_CANDIDATES[0]}" | grep -q 'non-free-firmware'
+          echo "${MIRROR_CANDIDATES[0]}" | grep -q 'bookworm-backports'
+
+          get_mirror_candidates "US" "debian" "bullseye"
+          echo "${MIRROR_CANDIDATES[0]}" | grep -q 'deb.debian.org'
+          ! echo "${MIRROR_CANDIDATES[0]}" | grep -q 'non-free-firmware'
+          ! echo "${MIRROR_CANDIDATES[0]}" | grep -q 'bullseye-backports'
+          echo "${MIRROR_CANDIDATES[0]}" | grep -q 'bullseye-security'
 
           echo "helper checks passed"
           EOF
